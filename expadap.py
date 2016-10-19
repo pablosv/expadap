@@ -1,78 +1,130 @@
+"""
+This file contains the core classes to numerically study exploratory
+adaptation. These are environment, cell, and simulation. There are other
+classes that are auxiliary, such as chemicals, interactions, and xxx. These
+should perhaps go into a tools file. Such a tools file could also contain
+analysis functions, as well as storage functions/classes.
+"""
+
 import random
 import numpy as np
-
-class parameters:
-  """
-  Parameters of the simulation, including the 
-  """
-  def __init__(self, nettype = 'sf-sf', sat ='cubical', stress = 'piecewise',
-               N = 100, T = 1000, dt = 100, g = 0.1, s = 1.0, c = 0.1,
-               alpha = 0.1, Nt = 1, y0 = 0, M0 = 0.1, mu = 0.1, eps = 0.1):
-    self.nettype = nettype # network type
-    self.sat = sat # type of saturating function
-    self.env = env # type of environment
-    self.N = N # size of the cell network
-    self.T = T # total time steps
-    self.dt = dt # storage steps
-    self.g = g # network gain
-    self.s = s # saturation sensitivity
-    self.c = c # sparseness of trait vectors b
-    self.alpha = alpha # 
-    self.Nt = Nt # number of traits
-    self.y0 = y0 # target phenotype
-    self.M0 = M0 # stress amplitude
-    self.mu = mu # stress sensitivity
-    self.eps = eps # stress range
+import scipy.sparse as sp
 
 class environment: 
   """
-  Contains the trait vectors as well as the fitness landscape
+  Contains the trait vectors as well as the fitness function
   """
-  def __init__(self, parameters):
-    self.b  = np.random(parameters.N, sigma) # traits
+  def __init__(self, stress = 'tanh', M0 = 0.1, mu = 0.1, eps = 0.1, N = 100,
+               c = 0.2, alpha = 100., y0 = 0, g = 0.1):
+    self.stress = stress # type of environmental fitness
+    self.M0 = M0 # stress amplitude
+    self.mu = mu # stress sensitivity
+    self.eps = eps # stress range
+    self.N = N # size of the cell network
+    self.c = c # sparseness of trait vectors b
+    self.alpha = alpha # trait variance factor
+    self.g = g # network gain
+    self.y0 = y0 # target phenotype
+    self.b = self.traits() # traits
 
-  def __getitem__(self, tup):
+  def __getitem__(self, index):
     """
     Default return are traits
     """
-    i, j = tup
-    return self.b[i,j]
+    return np.array((self.b.todense()))[0][index]
 
-  def __setitem__(self, tup, value):
+  def __setitem__(self, index, value):
     """
     Default input are traits
     """
-    i, j = tup
-    self.b[i,j] = value
+    self.b[0,index] = value
 
-  def M(self, parameters):
+  def traits(self):
     """
-    Calculate stress
+    Generates a trait vector b with sparseness c. Its not-null elements are
+    sampled from a normal distribution with variance var that scales with N.
     """
-    cases = {'piecewise': M_pw, 'quartic': M_q4, 'quadratic': M_q2,
-             'sigmoidal': M_sig }                 
-    return cases[parameters.stress](self, parameters)
+    self.b = sp.rand(1, self.N, density = self.c, format='csr')
+    notnull = len(self.b.data)
+    var = self.alpha / (self.c * self.N * self.g**2)
+    self.b.data[:] = np.random.normal(0, var, notnull)
+    return self.b
 
-  def M_pw(self, parameters):
+  def M(self, y):
     """
-    Piecewise linear stress
+    Calculate stress for the corresponding function
     """
-    return 
+    cases = {'piecewise-constant': self.M_pwc, 'piecewise-linear': self.M_pwl,
+             'quartic': self.M_q4, 'quadratic': self.M_q2, 'tanh': self.M_th }                 
+    return cases[self.stress](y)
 
+  # environmental fitness functions
+  def M_pwc(self, y):
+    """
+    Piecewise constant stress
+    """
+    y = y - self.y0
+    M = np.piecewise(y, [np.abs(y)>self.eps, np.abs(y)<=self.eps],
+                        [self.M0, 0.])
+    return M
 
+  def M_pwl(self, y):
+    """
+    Piecewise linear and flat stress
+    """
+    y = y - self.y0
+    M = np.piecewise(y, [np.abs(y)>self.eps, np.abs(y)<=self.eps],
+                        [lambda y: np.abs(y)-self.eps, 0.])
+    return M
+  
+  def M_th(self, y):
+    """
+    Hyperbolic tangent stress
+    """
+    y = y - self.y0
+    M = (self.M0/2.) * (1+np.tanh((np.abs(y)-self.eps)/self.mu))
+    return M
 
+  def M_q4(self, y):
+    """
+    Quartic stress
+    """
+    y = y - self.y0
+    M = np.piecewise(y,[np.abs(y)>self.eps*2**.25, np.abs(y)<=self.eps*2**.25],
+                       [self.M0, lambda y: (self.M0/2)*(y/self.eps)**4])
+    return M
+
+  def M_q2(self, y):
+    """
+    Quadratic stress
+    """
+    y = y - self.y0
+    M = np.piecewise(y,[np.abs(y)>self.eps*2**.5, np.abs(y)<=self.eps*2**.5],
+                       [self.M0, lambda y: (self.M0/2)*(y/self.eps)**2])
+    return M
 
 class cell: 
   """
-  Contains all the state variables of the cell. It's a combination of the
+  Contains the state variables of the cell. It's a combination of the
   'chemicals' class, which contains the chemical state of the cell (x, phi)
   and the 'interactions' class, which contains the interactions (Jij, T) and
   performs basic operations on them (eigenvalues, ...)
   """
-  def __init__(self, parameters):
-    self.net  = interactions(parameters) # interaction network, J
-    self.chem = chemicals(parameters) # chemical composition, x
-    self.y = np.zeros(parameters.M) # phenotypes, y
+  def __init__(self, nettype = 'sf-sf', sat ='cubical', N = 100, g = 0.1,
+               s = 1., beta = 1., gamma = .5, p = .01, rho =0.1):
+    self.nettype = nettype # network type
+    self.sat = sat # type of saturating function
+    self.N = N # size of the cell network
+    self.g = g # network gain
+    self.s = s # saturation sensitivity
+    self.beta = beta # scale of exponential distribution
+    self.gamma = gamma # scale of scale-free distribution
+    self.p = p # scale of binomial distribution
+    self.rho = rho # density of sparse matrix
+
+    self.net  = interactions(self) # interaction network, J
+    self.chem = chemicals(self) # chemical composition, x
+    self.y = 0 # phenotypes, y
 
   def __getitem__(self, index):
     """
@@ -86,84 +138,46 @@ class cell:
     """
     self.chem[index] = value
 
-
-class simulation: # first run parameters, then cell, then environment, then simulate
+class simulation:
   """
   Run the iterative loop
   """
-  def __init__(self, parameters, cell, env):
-    self.parameters = parameters
+  def __init__(self, env, cell, T = 1000, dt = 100):
+    self.T = T # total time steps
+    self.dt = dt # storage steps
+    if (env.N,env.g) != (cell.N,cell.g):
+      print 'Cell and environment not compatible'
+      quit()
 
-  def evolve(self):
+  def update(self):
     # update chemicals
-    cell[:]= cell[:]+(cell.net[:,:]*cell.phi()-cell[:])*self.parameters.dt +
-             np.rand.rand()*self.parameters.dt**0.5
+    cell[:]= cell[:]+(cell.net[:,:]*cell.phi()-cell[:])*self.parameters.dt
+    + np.rand.rand()*self.parameters.dt**0.5
 
     # update phenotype
     cell.y = env[:,:]*cell[:]
 
-    # update connectivities with Ito rule
+    # update interations
     self.net[:,:] = np.sqrt(env.M(cell.y)*parameters.D)*np.rand.rand(size(J))
 
   def run(self):
-    for t in range(self.param.T):
-      self.flock.move()
-      if t==0: print('save initial flock with parameters: not implemented')
-      if t%self.param.dt==0: print('store flock positions and angles: not implemented') #
+    for t in range(self.T):
+      if t==0: print('save parameters and initial state')
+      if t%self.dt==0: print('save state')
+      self.update()
 
 
 
 
 # TOOLS TO BE USED, MAYBE ANOTHER FILE?
-class chemicals:
-  """
-  This class contains the chemical concentrations as well as their saturating
-  functions
-  """
-  def __init__(self, parameters):
-    self.x = np.random(parameters.N)
-
-  def __getitem__(self, index):
-    """
-    By default this class returns x
-    """
-    return self.x[i]
-
-  def __setitem__(self,index, value):
-    """
-    And by default this class sets x as input
-    """
-    self.x[index] = value
-
-  def phi(self):
-    """
-    This function reads the type of saturation and calculates it for x
-    """
-    cases = {'sigmoidal': sat_sig, 'cubical': sat_cub}                 
-    return cases[parameters.saturation](self, parameters)
-
-  def sat_sig(self, parameters):
-    """
-    Sigmoidal saturation function
-    """
-    a = 1+1
-    return a
-
-  def sat_cub(self, parameters):
-    """
-    Cubical saturation function
-    """
-    return self.x-(parameters.sat/(3*2))*self.x**3
-
-
 class interactions:
   """
   Taking the parameters as input this class generates an interaction matrix
   and calculates the topology 
   """
-  def __init__(self,parameters):
-    self.W0 = self.generate(parameters)
-    self.T  = scipy.sign(self.W0)
+  def __init__(self, cell):
+    self.W0 =  self.generate(cell)
+    self.T  = self.W0
     self.J  = self.W0
 
   def __getitem__(self, tup):
@@ -180,14 +194,15 @@ class interactions:
     i, j = tup
     self.J[i,j] = item
 
-  def generate(self, parameters):
+  def generate(self, cell):
     """
     This function reads the type of network desired from the parameters and
     calls the corresponding function to generate it.
     """
-    cases = {'sf-sf': net_sfsf, 'sf-exp': net_sfexp, 'exp-sf': net_expsf,
-             'sf-exp': net_sfexp, 'sf-bin': net_sfbin, 'bin-sf': net_binsf}                 
-    return cases[parameters.nettype](parameters)
+    cases = {'sf-sf': self.net_sfsf, 'sf-exp': self.net_sfexp,
+             'exp-sf': self.net_expsf, 'sf-bin': self.net_sfbin,
+             'bin-sf': self.net_binsf, 'erdos-reny': self.net_er}    
+    return cases[cell.nettype](cell)
 
   # Functions that calculate network properties
   def eigenvalues(self):
@@ -206,130 +221,199 @@ class interactions:
     return 'Nothing for now'
 
   # Functions that generate interaction networks
-  def net_sfsf(parameters):
+  def net_sfsf(self, cell):
     """
     Generate interaction networks scale-free -- scale-free
     """
-    W = np.random.random(parameters.N,parameters.N)
+    W = sp.rand(cell.N,cell.N,density=0.1) #np.random.pareto(.1,(2,2))
     return W
 
-  def net_sfexp(parameters):
+  def net_sfexp(self, cell):
+    """
+    Generate interaction networks scale-free -- exponential
+    """ 
+    # create graph class
+    # for i<100 attempts:
+    #   G.in  = expo(length)
+    #   G.out = expo(length)
+    #   if G.test() == True: break
+    # if i=99: print 'No network found in 100 attempts' 
+    # return
+
+    W = np.random.exponential(.1,(2,2))
+    return 1
+
+  def net_expsf(self, cell):
     """
     Generate interaction networks scale-free -- exponential
     """
-    W = np.random.random(parameters.N,parameters.N)
+    W = 1
+    return 1
 
-    return W
+  def net_sfbin(self, cell):
+    """
+    Generate interaction networks scale-free -- exponential
+    """
+    W = 1
+    return 1
 
+  def net_binsf(self, cell):
+    """
+    Generate interaction networks scale-free -- exponential
+    """
+    W = 1
+    return 1
 
+  def net_er(self, cell):
+    """
+    Generate interaction networks binomial -- binomial (i.e., erdos-reny)
+    """
+    din  = np.random.binomial(cell.N, cell.p, cell.N)
+    dout = np.random.binomial(cell.N, cell.p, cell.N)
+    G = graph(din = din, dout = dout)
+    
+    while din.sum()!=dout.sum() or G.test()==False:
+      din  = np.random.binomial(cell.N, cell.p, cell.N)
+      dout = np.random.binomial(cell.N, cell.p, cell.N)
+      G.__init__(din = din, dout = dout)
 
-class potential:
+    #G.construct()
+    return G
+
+class graph:
+    """
+    This is the graph class. It constructs directed graphs given the in and out
+    degree distributions. It also provides the weight of the graph. 
+    """
+    def __init__(self, din=np.array([2,2,1,1,1]), dout=np.array([2,1,3,1,0])):
+      self.din  = din  # in connections
+      self.dout = dout # out connections
+      self.labels = 1+np.arange(len(din)) # nodes' labels
+      self.D = self.normal(np.array((self.din, self.dout, self.labels))) # BDS
+      self.T = np.zeros((len(din),len(din))) # sparse matrix with zeros.
+      self.w = 1. # weight of T
+
+    def construct(self):
+      """
+      We follow the algorithm in Kim et al, using their numbering of the steps
+      """
+      D = self.D # (0.1) working BDS
+      if self.test() == False: return 'Non-graphable'# (0.2) test graphability
+      nout = np.count_nonzero(D[1,:]) # (0.3) number of non-null out-nodes
+      
+      for k in np.arange(nout):
+        D = self.normal(D) # (7) set D to normal order
+        i = np.argmax(D[1,:]>0) # (1.0) working index
+        a = D[2,i] # (1.1) working label
+        stubs = D[1,i] # (1.2) number of stubs
+        chi = np.append(a, D[2,np.where(D[0,:]==0)[0]]) # (2) forbidden labels   
+        
+        for s in np.arange(stubs):
+          if s>0: D = self.normal(D) # (6.0)  set D to normal order
+          i = np.argmax(D[2,:]==a) # (6.1) index of a
+          A = self.allowed(D, i, a, chi) # (3) graphicable labels
+          print A
+          b = np.random.choice(A) # (4.1) choose an in-node by its label
+          self.T[a-1,b-1] = 1 # (4.2) make link between labeled nodes
+          j = np.argmax(D[2,:]==b) # (4.3) index of b 
+          D[0,j], D[1,i] = D[0,j] - 1, D[1,i] - 1 # (4.4) calculate residual
+          chi = np.append(chi,b) # (5) b is now forbidden        
+      return
+
+    def test(self):
+      """
+      Fulkerson-Ryser test of graphability for a given in/out degree sequences
+      """
+      if (self.din>len(self.din)-1).any(): print 'E1'; return False # din < N
+      if (self.dout>len(self.din)-1).any(): print 'E2'; return False # dout < N
+      if self.din.sum()!=self.dout.sum(): print 'E3'; return False # sums
+      for k in np.arange(0,len(self.din)-1):
+        if self.LpKp(k, self.D)>0: print 'E4'; return False # Lk > Rk
+      return True
+
+    def allowed(self, D, i, a, chi):
+      """
+      For the current D, a  and chi find the set of in-nodes (j) that preserve
+      graphicality. This is step (3) in Kim et al.
+      """
+      L = np.setdiff1d(D[2,:],chi)[:D[1,i]] # (3.1) compute L
+      R = np.setdiff1d(D[2,:],np.append(chi,L)) # (3.2) compute R
+      Dp = np.zeros(np.shape(D)) # allocate D'
+      Dp[:] = D[:] # (3.3.1) create D'
+      Dp[0,np.in1d(D[2,:],L[:-1])] = Dp[0,np.in1d(D[2,:],L[:-1])] -1 # (3.3.2)
+      Dp[1,i] = 1 # (3.3.3) set out nodes
+      Dp = self.normal_in(Dp) # (3.4) rearrange Dp
+      i = np.argmax(Dp[2,:]==a) # recalculate i
+      kini = 0 if i!=0 else 1 # (3.5.1) set initial k
+      k0, N = -1, np.shape(Dp)[1] # (3.5.2) set reference k0, and size
+      for k in range(kini,N): # (3.5)
+        if self.LpKp(k, Dp) == 0: k0 = k; break
+      if k0==-1 or k0==N-1: return np.setdiff1d(D[2,:],chi) # (3.5) return A
+      qp = k0+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]==True) # (3.6.1) q'
+      q = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
+      return np.setdiff1d(D[2,:q],chi) # (3.7) return A
+
+    def normal(self, D):
+      """
+      Put the bi-degree sequence D in normal order. Since 'sort' uses
+      increasing order we need to reverse the array
+      """
+      Dr = D[:,::-1]
+      D = Dr[:,np.lexsort((Dr[1,:],Dr[0,:]))][:,::-1]
+      return D
+
+    def normal_in(self, Dp):
+      """
+      Put the bi-degree sequence D in normal order only considering the in
+      nodes. This is faster than self.normal
+      """
+      Dp = Dp[:,np.argsort(Dp[0,:][::-1])]
+      return Dp
+
+    def LpKp(self, k, D):
+      """
+      Test the L'(k) = R'(k) condition (equations 4 and 5).
+      """
+      Lp = D[0,:k+1].sum()
+      Rp = np.minimum(np.ones(k+1)*k,D[1,:k+1]).sum()+np.minimum(np.ones(len(D[1,k+1:]))*(k+1),D[1,k+1:]).sum()
+      return Lp - Rp
+
+class chemicals:
   """
-  Taking the parameters as input this class generates an interaction matrix
-  and calculates the topology 
+  This class contains the chemical concentrations as well as their saturating
+  functions
   """
-  def __init__(self,parameters):
-    self.W = self.generate_W(parameters)
-    self.T = topology of T
-    self.J = strengths of J
+  def __init__(self, cell):
+    self.x = np.random.rand(cell.N)
 
-  def generate_W(self,parameters):
-    switcher = {'sf-sf': net_sfsf, 'sf-exp': net_sfsf, 'exp-sf': net_expsf,
-                'sf-exp': net_sfexp, 'sf-bin': net_sfbin, 'bin-sf': net_binsf}                 
-    return switcher[parameters.nettype](parameters)
+  def __getitem__(self, index):
+    """
+    By default this class returns x
+    """
+    return self.x[index]
 
-  def net_sfsf(parameters):
-    W = np.random.random(parameters.N,parameters.N)
+  def __setitem__(self,index, value):
+    """
+    And by default this class sets x as input
+    """
+    self.x[index] = value
 
-    return W
+  def phi(self):
+    """
+    This function reads the type of saturation and calculates it for x
+    """
+    cases = {'sigmoidal': sat_sig, 'cubical': sat_cub}                 
+    return cases[cell.sat](self, cell)
 
+  def sat_sig(self, cell):
+    """
+    Sigmoidal saturation function
+    """
+    a = 1+1
+    return a
 
-
-## from old softwareeee!!!!
-
-
-class analysis:
-  """
-  Perform analysis of the simulation, for which we pass... stored flocks?
-  """
-  def __init__(self, flock):
-    self.flock = flock
-
-class bucket_grid:
-  """
-  Fixed radius nearest neighbour search using a grid of buckets of size r.
-  Width and height are needed to wrap around (periodic boundary conditions).
-  """
-  def __init__(self, points, param):
-    self.param = param
-    self.n = self.param.width / self.param.r # # of horizontal buckets
-    self.m = self.param.height / self.param.r # # of vertical buckets 
-    self.buckets = {} # dictionary of buckets -> points
-
-    # create dictionary for given points
-    for p in points:
-      self.buckets.setdefault(self.get_index(p), []).append(p)
- 
-  def get_index(self, p):
-    # returns bucket coordinates of point
-    return ( int(floor(p[0]/self.param.width*self.n)),
-             int(floor(p[1]/self.param.height*self.m)) )
-
-  def neighbours(self, p):
-    # position of the central bucket
-    i, j = self.get_index(p)
-    # this is the number of adjacent buckets we need to check
-    cx = int(ceil(float(self.param.r)/self.param.width*self.n))
-    cy = int(ceil(float(self.param.r)/self.param.height*self.m))
-    neighbours = []
-    # check all neighbouring buckets
-    for a in range(-cx, 1+cx):
-      for b in range(-cy, 1+cy):
-        # add points
-        neighbours += filter(
-          lambda q: dist(p, q) < self.param.r,
-          self.buckets.setdefault( ( (i+a)%self.n, (j+b)%self.m ), [])
-          )
-    return neighbours
-
-class flock:
-  """
-  Many of those things together.
-  """
-  # define a class param with all parameters
-  def __init__(self, param):
-    self.param = param
-
-    # create birds
-    self.birds = [ bird(self.param, # can change to param?
-                        [ random.random()*self.param.width, random.random()*self.param.height ], 
-                        2*pi*random.random() 
-                       ) for i in range(self.param.N) ]
-    # self.birds_old = copy.deepcopy(self.birds) 
-
-  def move(self):
-    # create the buckets
-    grid = bucket_grid(self.birds, self.param)
-
-    # update the angles
-    for b in self.birds:
-      sin_tot = 0.
-      cos_tot = 0.
-      # loop over neighbours
-      neighbours = grid.neighbours(b) 
-      for n in neighbours:
-          sin_tot += np.sin(n.phi)
-          cos_tot += np.cos(n.phi)
-      # update ONE SHOULD UPDATE ALL ELEMENTS AT THE SAME TIME, I need birds_o
-      b.phi = atan2(sin_tot, cos_tot) + self.param.n/2.*(1-2.*random.random())
-
-    # move them
-    for b in self.birds:
-      b.move()
-
-class plotter:
-  """
-  Make movie of the flock, also plot correlations and so on...
-  """
-  # def frame
-  # def movi
+  def sat_cub(self, cell):
+    """
+    Cubical saturation function
+    """
+    return 1. #self.x-(cell.s/(3*2))*self.x**3
