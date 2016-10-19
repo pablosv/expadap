@@ -111,7 +111,7 @@ class cell:
   performs basic operations on them (eigenvalues, ...)
   """
   def __init__(self, nettype = 'sf-sf', sat ='cubical', N = 100, g = 0.1,
-               s = 1., beta = 1., gamma = .5, p = .01, rho =0.1):
+               s = 1., beta = 1., gamma = 1.4, a = 1., p = .01, rho =0.1):
     self.nettype = nettype # network type
     self.sat = sat # type of saturating function
     self.N = N # size of the cell network
@@ -176,9 +176,9 @@ class interactions:
   and calculates the topology 
   """
   def __init__(self, cell):
-    self.W0 =  self.generate(cell)
-    self.T  = self.W0
-    self.J  = self.W0
+    self.T =  self.generate(cell)
+    self.W0 = self.T
+    self.J  = self.T
 
   def __getitem__(self, tup):
     """
@@ -259,10 +259,18 @@ class interactions:
 
   def net_binsf(self, cell):
     """
-    Generate interaction networks scale-free -- exponential
+    Generate interaction networks bonimial -- scale-free
     """
-    W = 1
-    return 1
+    din  = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
+    dout = np.random.binomial(cell.N, cell.p, cell.N)
+    G = graph(din = din, dout = dout)
+    
+    while din.sum()!=dout.sum() or G.test()==False:
+      din  = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
+      dout = np.random.binomial(cell.N, cell.p, cell.N)
+      G.__init__(din = din, dout = dout)
+
+    return G
 
   def net_er(self, cell):
     """
@@ -277,7 +285,6 @@ class interactions:
       dout = np.random.binomial(cell.N, cell.p, cell.N)
       G.__init__(din = din, dout = dout)
 
-    #G.construct()
     return G
 
 class graph:
@@ -297,8 +304,9 @@ class graph:
       """
       We follow the algorithm in Kim et al, using their numbering of the steps
       """
+      self.T = np.zeros((len(self.din),len(self.din))) # (0.0) reset topology
       D = self.D # (0.1) working BDS
-      if self.test() == False: return 'Non-graphable'# (0.2) test graphability
+      if self.test() == False: return 'Non-graphable'# (0.2) test
       nout = np.count_nonzero(D[1,:]) # (0.3) number of non-null out-nodes
       
       for k in np.arange(nout):
@@ -309,16 +317,20 @@ class graph:
         chi = np.append(a, D[2,np.where(D[0,:]==0)[0]]) # (2) forbidden labels   
         
         for s in np.arange(stubs):
+          if np.count_nonzero(D[1,:])==1: # last node
+            bs = D[2,np.where(D[0,:]==1)[0]]
+            self.T[a-1,bs-1] = 1 # wire
+            break
           if s>0: D = self.normal(D) # (6.0)  set D to normal order
           i = np.argmax(D[2,:]==a) # (6.1) index of a
           A = self.allowed(D, i, a, chi) # (3) graphicable labels
-          print A
           b = np.random.choice(A) # (4.1) choose an in-node by its label
           self.T[a-1,b-1] = 1 # (4.2) make link between labeled nodes
           j = np.argmax(D[2,:]==b) # (4.3) index of b 
           D[0,j], D[1,i] = D[0,j] - 1, D[1,i] - 1 # (4.4) calculate residual
-          chi = np.append(chi,b) # (5) b is now forbidden        
-      return
+          self.w *= np.size(np.array(A)) # (4.5) path weight
+          chi = np.append(chi,b) # (5) b is now forbidden
+      return None
 
     def test(self):
       """
@@ -349,7 +361,7 @@ class graph:
       for k in range(kini,N): # (3.5)
         if self.LpKp(k, Dp) == 0: k0 = k; break
       if k0==-1 or k0==N-1: return np.setdiff1d(D[2,:],chi) # (3.5) return A
-      qp = k0+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]==True) # (3.6.1) q'
+      qp = k0+1+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]==True) # (3.6.1) q'
       q = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
       return np.setdiff1d(D[2,:q],chi) # (3.7) return A
 
@@ -367,7 +379,7 @@ class graph:
       Put the bi-degree sequence D in normal order only considering the in
       nodes. This is faster than self.normal
       """
-      Dp = Dp[:,np.argsort(Dp[0,:][::-1])]
+      Dp = Dp[:,np.argsort(-Dp[0,:])]
       return Dp
 
     def LpKp(self, k, D):
