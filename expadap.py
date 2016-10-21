@@ -123,12 +123,10 @@ class cell:
     self.rho = rho # density of sparse matrix
 
     graph  = interactions(self) # interaction network
-    chem = chemicals(self) # chemical composition, x
-
     self.T = graph.T
     self.W = graph.W
     self.J = graph.J
-    self.x = chem.x
+    self.x = np.random.rand(self.N)
     self.y = 0 # phenotypes, y
 
   def __getitem__(self, index):
@@ -143,22 +141,43 @@ class cell:
     """
     self.x[index] = value
 
+  def phi(self):
+    """
+    This function reads the type of saturation and calculates it for x
+    """
+    cases = {'sigmoidal': self.sat_sig, 'cubical': self.sat_cub}                 
+    return cases[self.sat]()
+
+  def sat_sig(self):
+    """
+    Sigmoidal saturation function
+    """
+    a = 1+1
+    return a
+
+  def sat_cub(self):
+    """
+    Cubical saturation function
+    """
+    return self.x-(self.s/(3*2))*self.x**3
+
 class simulation:
   """
   Run the iterative loop
   """
-  def __init__(self, env, cell, T = 10, dt = .1):
+  def __init__(self, env, cell, T = 10, dt = .1, dT = 1):
     self.T = T # total time steps
-    self.dt = dt # storage steps
-    self.env = env
-    self.cell = cell
+    self.dt = dt # time step increment
+    self.dT = dT # storage times
+    self.env = env # environment
+    self.cell = cell # cell
     if (env.N,env.g) != (cell.N, cell.g):
       print 'Cell and environment not compatible'
       quit()
 
   def update(self):
     # update chemicals
-    self.cell[:] = self.cell[:]+(np.sin(self.cell.W.dot(self.cell.x))-self.cell[:])*self.dt
+    self.cell[:] = self.cell[:]+(self.cell.W.dot(self.cell.phi())-self.cell[:])*self.dt
               #+ np.rand.rand()*self.parameters.dt**0.5
 
     # update phenotype
@@ -173,9 +192,8 @@ class simulation:
   def run(self):
     for t in np.arange(0,self.T,self.dt):
       if t==0: print('save parameters and initial state')
-      if t%self.dt==0: print('save state')
+      if t%self.dT==0: print self.cell[0]
       self.update()
-      print cell.x[0]
 
 
 
@@ -429,43 +447,3 @@ class graph:
       Lp = D[0,:k+1].sum()
       Rp = np.minimum(np.ones(k+1)*k,D[1,:k+1]).sum()+np.minimum(np.ones(len(D[1,k+1:]))*(k+1),D[1,k+1:]).sum()
       return Lp - Rp
-
-class chemicals:
-  """
-  This class contains the chemical concentrations as well as their saturating
-  functions
-  """
-  def __init__(self, cell):
-    self.x = np.random.rand(cell.N)
-
-  def __getitem__(self, index):
-    """
-    By default this class returns x
-    """
-    return self.x[index]
-
-  def __setitem__(self,index, value):
-    """
-    And by default this class sets x as input
-    """
-    self.x[index] = value
-
-  def phi(self, cell):
-    """
-    This function reads the type of saturation and calculates it for x
-    """
-    cases = {'sigmoidal': self.sat_sig, 'cubical': self.sat_cub}                 
-    return cases[cell.sat](self, cell)
-
-  def sat_sig(self, cell):
-    """
-    Sigmoidal saturation function
-    """
-    a = 1+1
-    return a
-
-  def sat_cub(self, cell):
-    """
-    Cubical saturation function
-    """
-    return self.x-(cell.s/(3*2))*self.x**3
