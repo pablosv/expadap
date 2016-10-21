@@ -111,7 +111,7 @@ class cell:
   performs basic operations on them (eigenvalues, ...)
   """
   def __init__(self, nettype = 'sf-sf', sat ='cubical', N = 100, g = 0.1,
-               s = 1., beta = 1., gamma = 1.4, a = 1., p = .01, rho =0.1):
+               s = 1., beta = 1., gamma = 1.2, a = 1., p = .01, rho =0.1):
     self.nettype = nettype # network type
     self.sat = sat # type of saturating function
     self.N = N # size of the cell network
@@ -122,49 +122,60 @@ class cell:
     self.p = p # scale of binomial distribution
     self.rho = rho # density of sparse matrix
 
-    self.net  = interactions(self) # interaction network, J
-    self.chem = chemicals(self) # chemical composition, x
+    graph  = interactions(self) # interaction network
+    chem = chemicals(self) # chemical composition, x
+
+    self.T = graph.T
+    self.W = graph.W
+    self.J = graph.J
+    self.x = chem.x
     self.y = 0 # phenotypes, y
 
   def __getitem__(self, index):
     """
     Default return are chemical concentrations
     """
-    return self.chem[index]
+    return self.x[index]
 
   def __setitem__(self, index, value):
     """
     Default input is the chemical concentration
     """
-    self.chem[index] = value
+    self.x[index] = value
 
 class simulation:
   """
   Run the iterative loop
   """
-  def __init__(self, env, cell, T = 1000, dt = 100):
+  def __init__(self, env, cell, T = 10, dt = .1):
     self.T = T # total time steps
     self.dt = dt # storage steps
-    if (env.N,env.g) != (cell.N,cell.g):
+    self.env = env
+    self.cell = cell
+    if (env.N,env.g) != (cell.N, cell.g):
       print 'Cell and environment not compatible'
       quit()
 
   def update(self):
     # update chemicals
-    cell[:]= cell[:]+(cell.net[:,:]*cell.phi()-cell[:])*self.parameters.dt
-    + np.rand.rand()*self.parameters.dt**0.5
+    self.cell[:] = self.cell[:]+(np.sin(self.cell.W.dot(self.cell.x))-self.cell[:])*self.dt
+              #+ np.rand.rand()*self.parameters.dt**0.5
 
     # update phenotype
-    cell.y = env[:,:]*cell[:]
+    self.cell.y = np.dot(self.env[:], self.cell[:])
 
-    # update interations
-    self.net[:,:] = np.sqrt(env.M(cell.y)*parameters.D)*np.rand.rand(size(J))
+    # update interactions
+    self.cell.J = np.sqrt(self.env.M(self.cell.y))*np.random.normal(0, 1, self.cell.J.shape[0])
+    self.cell.W = sp.csr_matrix((self.cell.J,self.cell.T.nonzero()),
+                 self.cell.T.shape)
+
 
   def run(self):
-    for t in range(self.T):
+    for t in np.arange(0,self.T,self.dt):
       if t==0: print('save parameters and initial state')
       if t%self.dt==0: print('save state')
       self.update()
+      print cell.x[0]
 
 
 
@@ -176,9 +187,10 @@ class interactions:
   and calculates the topology 
   """
   def __init__(self, cell):
-    self.T =  self.generate(cell)
-    self.W0 = self.T
-    self.J  = self.T
+    self.T = self.generate(cell)
+    self.J = np.random.normal(0, 1, np.count_nonzero(self.T))
+    self.W = sp.csr_matrix((self.J,self.T.nonzero()),
+              self.T.shape)
 
   def __getitem__(self, tup):
     """
@@ -252,25 +264,45 @@ class interactions:
 
   def net_sfbin(self, cell):
     """
-    Generate interaction networks scale-free -- exponential
-    """
-    W = 1
-    return 1
-
-  def net_binsf(self, cell):
-    """
-    Generate interaction networks bonimial -- scale-free
+    Generate interaction networks scale-free -- binomial
     """
     din  = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
     dout = np.random.binomial(cell.N, cell.p, cell.N)
     G = graph(din = din, dout = dout)
     
+    print 'Generating degree sample'
     while din.sum()!=dout.sum() or G.test()==False:
       din  = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
       dout = np.random.binomial(cell.N, cell.p, cell.N)
+      # print din.sum()-dout.sum()
       G.__init__(din = din, dout = dout)
 
-    return G
+    print 'Constructing topology'
+    G.construct()
+    # perform test bw bds and G.T
+
+
+    return G.T
+
+  def net_binsf(self, cell):
+    """
+    Generate interaction networks binomial -- scale-free
+    """
+    din = np.random.binomial(cell.N, cell.p, cell.N)
+    dout = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
+    G = graph(din = din, dout = dout)
+    
+    print 'Generating degree sample'
+    while din.sum()!=dout.sum() or G.test()==False:
+      din = np.random.binomial(cell.N, cell.p, cell.N)
+      dout = np.round(np.random.pareto(cell.gamma, cell.N)).astype(int)
+      # print din.sum()-dout.sum()
+      G.__init__(din = din, dout = dout)
+
+    print 'Constructing topology'
+    G.construct()
+
+    return G.T
 
   def net_er(self, cell):
     """
@@ -280,12 +312,16 @@ class interactions:
     dout = np.random.binomial(cell.N, cell.p, cell.N)
     G = graph(din = din, dout = dout)
     
+    print 'Generating degree sample'
     while din.sum()!=dout.sum() or G.test()==False:
       din  = np.random.binomial(cell.N, cell.p, cell.N)
       dout = np.random.binomial(cell.N, cell.p, cell.N)
       G.__init__(din = din, dout = dout)
 
-    return G
+    print 'Constructing topology'
+    G.construct()
+
+    return G.T
 
 class graph:
     """
@@ -317,18 +353,21 @@ class graph:
         chi = np.append(a, D[2,np.where(D[0,:]==0)[0]]) # (2) forbidden labels   
         
         for s in np.arange(stubs):
-          if np.count_nonzero(D[1,:])==1: # last node
+          if np.count_nonzero(D[1,:])==1 or np.count_nonzero(D[0,:])==1: # last node
             bs = D[2,np.where(D[0,:]==1)[0]]
             self.T[a-1,bs-1] = 1 # wire
+            # print 'yay'
             break
           if s>0: D = self.normal(D) # (6.0)  set D to normal order
           i = np.argmax(D[2,:]==a) # (6.1) index of a
           A = self.allowed(D, i, a, chi) # (3) graphicable labels
+          # print str(A)
+          # print str(D)
           b = np.random.choice(A) # (4.1) choose an in-node by its label
           self.T[a-1,b-1] = 1 # (4.2) make link between labeled nodes
           j = np.argmax(D[2,:]==b) # (4.3) index of b 
           D[0,j], D[1,i] = D[0,j] - 1, D[1,i] - 1 # (4.4) calculate residual
-          self.w *= np.size(np.array(A)) # (4.5) path weight
+          #self.w *= np.size(np.array(A)) # (4.5) path weight
           chi = np.append(chi,b) # (5) b is now forbidden
       return None
 
@@ -361,6 +400,7 @@ class graph:
       for k in range(kini,N): # (3.5)
         if self.LpKp(k, Dp) == 0: k0 = k; break
       if k0==-1 or k0==N-1: return np.setdiff1d(D[2,:],chi) # (3.5) return A
+      # print('E3');
       qp = k0+1+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]==True) # (3.6.1) q'
       q = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
       return np.setdiff1d(D[2,:q],chi) # (3.7) return A
@@ -410,11 +450,11 @@ class chemicals:
     """
     self.x[index] = value
 
-  def phi(self):
+  def phi(self, cell):
     """
     This function reads the type of saturation and calculates it for x
     """
-    cases = {'sigmoidal': sat_sig, 'cubical': sat_cub}                 
+    cases = {'sigmoidal': self.sat_sig, 'cubical': self.sat_cub}                 
     return cases[cell.sat](self, cell)
 
   def sat_sig(self, cell):
@@ -428,4 +468,4 @@ class chemicals:
     """
     Cubical saturation function
     """
-    return 1. #self.x-(cell.s/(3*2))*self.x**3
+    return self.x-(cell.s/(3*2))*self.x**3
