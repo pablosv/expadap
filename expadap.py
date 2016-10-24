@@ -9,13 +9,14 @@ analysis functions, as well as storage functions/classes.
 import random
 import numpy as np
 import scipy.sparse as sp
+import pickle
 
 class environment: 
   """
   Contains the trait vectors as well as the fitness function
   """
-  def __init__(self, stress = 'tanh', M0 = 0.1, mu = 0.1, eps = 0.1, N = 100,
-               c = 0.2, alpha = 100., y0 = 0, g = 0.1):
+  def __init__(self, stress = 'tanh', M0 = 2., mu = 0.01, eps = 3., N = 100,
+               c = 0.2, alpha = 100., y0 = 0, g = 10., D = 0.01):
     self.stress = stress # type of environmental fitness
     self.M0 = M0 # stress amplitude
     self.mu = mu # stress sensitivity
@@ -26,6 +27,7 @@ class environment:
     self.g = g # network gain
     self.y0 = y0 # target phenotype
     self.b = self.traits() # traits
+    self.D = D # diffusion constant of stress
 
   def __getitem__(self, index):
     """
@@ -110,8 +112,8 @@ class cell:
   and the 'interactions' class, which contains the interactions (Jij, T) and
   performs basic operations on them (eigenvalues, ...)
   """
-  def __init__(self, nettype = 'sf-sf', sat ='cubical', N = 100, g = 0.1,
-               s = 1., beta = 1., gamma = 1.2, a = 1., p = .01, rho =0.1):
+  def __init__(self, nettype = 'sf-sf', sat ='sigmoidal', N = 100, g = 10.,
+               s = 1., beta = 1., gamma = 1.2, a = 1., p = .01):
     self.nettype = nettype # network type
     self.sat = sat # type of saturating function
     self.N = N # size of the cell network
@@ -120,13 +122,13 @@ class cell:
     self.beta = beta # scale of exponential distribution
     self.gamma = gamma # scale of scale-free distribution
     self.p = p # scale of binomial distribution
-    self.rho = rho # density of sparse matrix
 
     graph  = interactions(self) # interaction network
     self.T = graph.T
-    self.W = graph.W
-    self.J = graph.J
-    self.x = np.random.rand(self.N)
+    self.J = np.random.normal( 0, self.g**2/self.T.sum(1).mean(),
+             np.count_nonzero(self.T) )
+    self.W = sp.csr_matrix((self.J, self.T.nonzero()), self.T.shape)
+    self.x = np.random.normal(0, 1, self.N)
     self.y = 0 # phenotypes, y
 
   def __getitem__(self, index):
@@ -152,8 +154,7 @@ class cell:
     """
     Sigmoidal saturation function
     """
-    a = 1+1
-    return a
+    return np.tanh(self.s*self.x)
 
   def sat_cub(self):
     """
@@ -165,20 +166,65 @@ class simulation:
   """
   Run the iterative loop
   """
-  def __init__(self, env, cell, T = 10, dt = .1, dT = 1):
+  def __init__(self, env, cell, T = 10, dt = .1, dT = 1, method = 'naama'):
     self.T = T # total time steps
     self.dt = dt # time step increment
     self.dT = dT # storage times
+    self.method = method # update method
     self.env = env # environment
     self.cell = cell # cell
-    if (env.N,env.g) != (cell.N, cell.g):
+    self.savex = np.zeros((cell.N, int(self.T/self.dT))) # x-save
+    self.saveJ = np.zeros((cell.J.shape[0], int(self.T/self.dT))) # J-save
+    self.savey = np.zeros(int(self.T/self.dT)) # y-save
+    if (env.N, env.g) != (cell.N, cell.g):
       print 'Cell and environment not compatible'
       quit()
 
+  def run(self):
+    """
+    Run simulation and store data
+    """
+    for t in np.arange(0,self.T,self.dt):      
+      if t==0:
+        with open('./DATA/simu.pkl','wb') as f: pickle.dump(self,f)
+        print 'Initial state saved'
+      if t%self.dT==0:
+        self.savex[:, int(t/self.dT)] = self.cell[:]
+        self.saveJ[:, int(t/self.dT)] = self.cell.J[:]
+        self.savey[int(t/self.dT)] = self.cell.y
+      self.update()
+
+
   def update(self):
+    """
+    This function reads the type of update, and calculates it for x
+    """
+    cases = {'naama': self.up_naama, 'naama-noise': self.up_nanoise}                 
+    return cases[self.method]()
+
+
+  def up_naama(self):
+    """
+    Update rule following Naama's paper
+    """
     # update chemicals
-    self.cell[:] = self.cell[:]+(self.cell.W.dot(self.cell.phi())-self.cell[:])*self.dt
+    self.cell[:] = self.cell[:]-(self.cell[:]-self.cell.W.dot(self.cell.phi()))*self.dt
               #+ np.rand.rand()*self.parameters.dt**0.5
+
+    # update phenotype
+    self.cell.y = np.dot(self.env[:], self.cell[:])
+
+    # update interactions
+    self.cell.J = self.cell.J + np.sqrt(self.env.D*self.env.M(self.cell.y))*np.random.normal(0, 1, self.cell.J.shape[0])*self.dt**0.5
+    self.cell.W = sp.csr_matrix((self.cell.J,self.cell.T.nonzero()),
+                 self.cell.T.shape)
+
+  def up_nanoise(self):
+    """
+    Update rule following Naama's paper, but with additional noise
+    """
+    # update chemicals
+    self.cell[:] = self.cell[:]+(self.cell.W.dot(self.cell.phi())-self.cell[:])*self.dt+ np.rand.rand()*self.parameters.dt**0.5
 
     # update phenotype
     self.cell.y = np.dot(self.env[:], self.cell[:])
@@ -187,18 +233,11 @@ class simulation:
     self.cell.J = np.sqrt(self.env.M(self.cell.y))*np.random.normal(0, 1, self.cell.J.shape[0])
     self.cell.W = sp.csr_matrix((self.cell.J,self.cell.T.nonzero()),
                  self.cell.T.shape)
-
-
-  def run(self):
-    for t in np.arange(0,self.T,self.dt):
-      if t==0: print('save parameters and initial state')
-      if t%self.dT==0: print self.cell[0]
-      self.update()
+ 
 
 
 
-
-# TOOLS TO BE USED, MAYBE ANOTHER FILE?
+# TOOLS TO BE USED, MOVE TO ANOTHER FILE?
 class interactions:
   """
   Taking the parameters as input this class generates an interaction matrix
@@ -206,23 +245,6 @@ class interactions:
   """
   def __init__(self, cell):
     self.T = self.generate(cell)
-    self.J = np.random.normal(0, 1, np.count_nonzero(self.T))
-    self.W = sp.csr_matrix((self.J,self.T.nonzero()),
-              self.T.shape)
-
-  def __getitem__(self, tup):
-    """
-    By default the interactions class returns the Jij
-    """
-    i, j = tup
-    return self.J[i,j]
-
-  def __setitem__(self, tup, item):
-    """
-    And by default the interaction class gets Jij as input
-    """
-    i, j = tup
-    self.J[i,j] = item
 
   def generate(self, cell):
     """
@@ -233,22 +255,6 @@ class interactions:
              'exp-sf': self.net_expsf, 'sf-bin': self.net_sfbin,
              'bin-sf': self.net_binsf, 'erdos-reny': self.net_er}    
     return cases[cell.nettype](cell)
-
-  # Functions that calculate network properties
-  def eigenvalues(self):
-    """
-    Calculate the eigenvalues of the interaction matrix
-    """
-    u = np.eigenvalues(self.J)
-
-    return u
-
-  def property1(self):
-    """
-    This function calculates a property of the network
-    """  
-
-    return 'Nothing for now'
 
   # Functions that generate interaction networks
   def net_sfsf(self, cell):
@@ -368,24 +374,21 @@ class graph:
         i = np.argmax(D[1,:]>0) # (1.0) working index
         a = D[2,i] # (1.1) working label
         stubs = D[1,i] # (1.2) number of stubs
-        chi = np.append(a, D[2,np.where(D[0,:]==0)[0]]) # (2) forbidden labels   
+        chi = np.append(a, D[2,np.where(D[0,:]==0)[0]]) # (2) forbidden labels
+        print(D)
         
         for s in np.arange(stubs):
-          if np.count_nonzero(D[1,:])==1 or np.count_nonzero(D[0,:])==1: # last node
+          if np.count_nonzero(D[1,:])==1 or np.count_nonzero(D[0,:])==1: # last
             bs = D[2,np.where(D[0,:]==1)[0]]
             self.T[a-1,bs-1] = 1 # wire
-            # print 'yay'
             break
           if s>0: D = self.normal(D) # (6.0)  set D to normal order
           i = np.argmax(D[2,:]==a) # (6.1) index of a
           A = self.allowed(D, i, a, chi) # (3) graphicable labels
-          # print str(A)
-          # print str(D)
           b = np.random.choice(A) # (4.1) choose an in-node by its label
           self.T[a-1,b-1] = 1 # (4.2) make link between labeled nodes
           j = np.argmax(D[2,:]==b) # (4.3) index of b 
           D[0,j], D[1,i] = D[0,j] - 1, D[1,i] - 1 # (4.4) calculate residual
-          #self.w *= np.size(np.array(A)) # (4.5) path weight
           chi = np.append(chi,b) # (5) b is now forbidden
       return None
 
@@ -405,22 +408,24 @@ class graph:
       For the current D, a  and chi find the set of in-nodes (j) that preserve
       graphicality. This is step (3) in Kim et al.
       """
-      L = np.setdiff1d(D[2,:],chi)[:D[1,i]] # (3.1) compute L
-      R = np.setdiff1d(D[2,:],np.append(chi,L)) # (3.2) compute R
+      L = D[2,np.in1d(D[2,:],chi,invert=True)][:D[1,i]] # (3.1) compute L
+      R = D[2,np.in1d(D[2,:],np.append(chi,L),invert=True)] # (3.2) compute R
       Dp = np.zeros(np.shape(D)) # allocate D'
       Dp[:] = D[:] # (3.3.1) create D'
       Dp[0,np.in1d(D[2,:],L[:-1])] = Dp[0,np.in1d(D[2,:],L[:-1])] -1 # (3.3.2)
       Dp[1,i] = 1 # (3.3.3) set out nodes
+      print(i,a)
+      print(chi,L,R)
       Dp = self.normal_in(Dp) # (3.4) rearrange Dp
       i = np.argmax(Dp[2,:]==a) # recalculate i
       kini = 0 if i!=0 else 1 # (3.5.1) set initial k
       k0, N = -1, np.shape(Dp)[1] # (3.5.2) set reference k0, and size
       for k in range(kini,N): # (3.5)
-        if self.LpKp(k, Dp) == 0: k0 = k; break
-      if k0==-1 or k0==N-1: return np.setdiff1d(D[2,:],chi) # (3.5) return A
-      # print('E3');
-      qp = k0+1+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]==True) # (3.6.1) q'
-      q = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
+        if self.LpKp(k, Dp) == 0: k0 = k; print 'yay'; break
+      if k0==-1 or k0==N-1:return np.setdiff1d(D[2,:],chi) # (3.5) return A
+      qp = k0+1+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]) # (3.6.1) q'
+      q  = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
+      print(k0+1,qp,Dp[2,qp])
       return np.setdiff1d(D[2,:q],chi) # (3.7) return A
 
     def normal(self, D):
@@ -429,7 +434,7 @@ class graph:
       increasing order we need to reverse the array
       """
       Dr = D[:,::-1]
-      D = Dr[:,np.lexsort((Dr[1,:],Dr[0,:]))][:,::-1]
+      D  = Dr[:,np.lexsort((Dr[1,:],Dr[0,:]))][:,::-1]
       return D
 
     def normal_in(self, Dp):
@@ -447,3 +452,4 @@ class graph:
       Lp = D[0,:k+1].sum()
       Rp = np.minimum(np.ones(k+1)*k,D[1,:k+1]).sum()+np.minimum(np.ones(len(D[1,k+1:]))*(k+1),D[1,k+1:]).sum()
       return Lp - Rp
+
