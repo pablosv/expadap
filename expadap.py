@@ -370,6 +370,7 @@ class graph:
       nout = np.count_nonzero(D[1,:]) # (0.3) number of non-null out-nodes
       
       for k in np.arange(nout):
+        print 'step'+str(nout-k)
         D = self.normal(D) # (7) set D to normal order
         i = np.argmax(D[1,:]>0) # (1.0) working index
         a = D[2,i] # (1.1) working label
@@ -409,7 +410,8 @@ class graph:
       graphicality. This is step (3) in Kim et al.
       """
       L = D[2,np.in1d(D[2,:],chi,invert=True)][:D[1,i]] # (3.1) compute L
-      R = D[2,np.in1d(D[2,:],np.append(chi,L),invert=True)] # (3.2) compute R
+      R = D[2,np.in1d(D[2,:],L,invert=True)] # (3.2) compute R
+      if R.size == 0: return np.setdiff1d(D[2,:],chi) # IS THIS CORRECT?
       Dp = np.zeros(np.shape(D)) # allocate D'
       Dp[:] = D[:] # (3.3.1) create D'
       Dp[0,np.in1d(D[2,:],L[:-1])] = Dp[0,np.in1d(D[2,:],L[:-1])] -1 # (3.3.2)
@@ -417,15 +419,23 @@ class graph:
       print(i,a)
       print(chi,L,R)
       Dp = self.normal_in(Dp) # (3.4) rearrange Dp
+      print(Dp)
       i = np.argmax(Dp[2,:]==a) # recalculate i
       kini = 0 if i!=0 else 1 # (3.5.1) set initial k
       k0, N = -1, np.shape(Dp)[1] # (3.5.2) set reference k0, and size
       for k in range(kini,N): # (3.5)
-        if self.LpKp(k, Dp) == 0: k0 = k; print 'yay'; break
-      if k0==-1 or k0==N-1:return np.setdiff1d(D[2,:],chi) # (3.5) return A
+        if self.LpKp(k, Dp) == 0:
+          k0 = k;
+          print 'k0='+str(k0)
+          break
+      if k0==-1 or k0==N-1:
+        print 'nothing left or found'
+        return np.setdiff1d(D[2,:],chi) # (3.5) return A
+      if np.in1d(Dp[2,:],R)[k0+1:].any()==False: print 'no R'; return np.setdiff1d(D[2,:],chi)
       qp = k0+1+np.argmax(np.in1d(Dp[2,:],R)[k0+1:]) # (3.6.1) q'
       q  = np.argmax(D[2,:]==Dp[2,qp]) # (3.6.2) q
-      print(k0+1,qp,Dp[2,qp])
+      print 'qp alpha(qp) are '
+      print(qp,Dp[2,qp])
       return np.setdiff1d(D[2,:q],chi) # (3.7) return A
 
     def normal(self, D):
